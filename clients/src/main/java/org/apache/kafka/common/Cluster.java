@@ -363,6 +363,10 @@ public final class Cluster {
         return topicIds.getOrDefault(topic, Uuid.ZERO_UUID);
     }
 
+    public Map<String, Uuid> topicIdsForNames() {
+        return topicIds;
+    }
+
     public String topicName(Uuid topicId) {
         return topicNames.get(topicId);
     }

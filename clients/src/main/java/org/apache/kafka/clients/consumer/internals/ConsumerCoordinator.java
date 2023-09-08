@@ -34,6 +34,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.FencedInstanceIdException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.InterruptException;
@@ -116,6 +117,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     private Set<String> joinedSubscription;
     private MetadataSnapshot metadataSnapshot;
     private MetadataSnapshot assignmentSnapshot;
+    private Map<String, Uuid> topicIdsForNames;
     private Timer nextAutoCommitTimer;
     private AtomicBoolean asyncCommitFenced;
     private ConsumerGroupMetadata groupMetadata;
@@ -182,7 +184,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         this.log = logContext.logger(ConsumerCoordinator.class);
         this.metadata = metadata;
         this.rackId = rackId == null || rackId.isEmpty() ? Optional.empty() : Optional.of(rackId);
-        this.metadataSnapshot = new MetadataSnapshot(this.rackId, subscriptions, metadata.fetch(), metadata.updateVersion());
+        Cluster cluster = metadata.fetch();
+        this.metadataSnapshot = new MetadataSnapshot(this.rackId, subscriptions, cluster, metadata.updateVersion());
+        this.topicIdsForNames = cluster.topicIdsForNames();
         this.subscriptions = subscriptions;
         this.defaultOffsetCommitCallback = new DefaultOffsetCommitCallback();
         this.autoCommitEnabled = autoCommitEnabled;
@@ -279,6 +283,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 .collect(Collectors.toSet());
         if (subscriptions.subscribeFromPattern(topicsToSubscribe))
             metadata.requestUpdateForNewTopics();
+        topicIdsForNames = cluster.topicIdsForNames();
     }
 
     private ConsumerPartitionAssignor lookupAssignor(String name) {
@@ -337,6 +342,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         // Only the leader is responsible for monitoring for metadata changes (i.e. partition changes)
         if (!isLeader)
             assignmentSnapshot = null;
+
+        subscriptions.setMemberId(memberId);
 
         ConsumerPartitionAssignor assignor = lookupAssignor(assignmentStrategy);
         if (assignor == null)
@@ -439,6 +446,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             // Update the current snapshot, which will be used to check for subscription
             // changes that would require a rebalance (e.g. new partitions).
             metadataSnapshot = new MetadataSnapshot(rackId, subscriptions, cluster, version);
+            topicIdsForNames = cluster.topicIdsForNames();
         }
     }
 

@@ -132,6 +132,7 @@ class KafkaApisTest {
     clientControllerQuotaManager, replicaQuotaManager, replicaQuotaManager, replicaQuotaManager, None)
   private val fetchManager: FetchManager = mock(classOf[FetchManager])
   private val clientMetricsManager: ClientMetricsManager = mock(classOf[ClientMetricsManager])
+  private val shareManager: ShareManager = mock(classOf[ShareManager])
   private val brokerTopicStats = new BrokerTopicStats
   private val clusterId = "clusterId"
   private val time = new MockTime
@@ -216,6 +217,7 @@ class KafkaApisTest {
       authorizer = authorizer,
       quotas = quotas,
       fetchManager = fetchManager,
+      shareManager = shareManager,
       brokerTopicStats = brokerTopicStats,
       clusterId = clusterId,
       time = time,

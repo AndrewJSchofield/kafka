@@ -233,6 +233,7 @@ object ConsoleConsumer extends Logging {
       | print.timestamp=true|false
       | print.key=true|false
       | print.offset=true|false
+      | print.delivery=true|false
       | print.partition=true|false
       | print.headers=true|false
       | print.value=true|false
@@ -497,6 +498,7 @@ class DefaultMessageFormatter extends MessageFormatter {
   var printValue = true
   var printPartition = false
   var printOffset = false
+  var printDelivery = false
   var printHeaders = false
   var keySeparator = utfBytes("\t")
   var lineSeparator = utfBytes("\n")
@@ -511,6 +513,7 @@ class DefaultMessageFormatter extends MessageFormatter {
     getPropertyIfExists(configs, "print.timestamp", getBoolProperty).foreach(printTimestamp = _)
     getPropertyIfExists(configs, "print.key", getBoolProperty).foreach(printKey = _)
     getPropertyIfExists(configs, "print.offset", getBoolProperty).foreach(printOffset = _)
+    getPropertyIfExists(configs, "print.delivery", getBoolProperty).foreach(printDelivery = _)
     getPropertyIfExists(configs, "print.partition", getBoolProperty).foreach(printPartition = _)
     getPropertyIfExists(configs, "print.headers", getBoolProperty).foreach(printHeaders = _)
     getPropertyIfExists(configs, "print.value", getBoolProperty).foreach(printValue = _)
@@ -548,18 +551,27 @@ class DefaultMessageFormatter extends MessageFormatter {
         output.write(utfBytes(s"$timestampType:$timestamp"))
       else
         output.write(utfBytes("NO_TIMESTAMP"))
-      writeSeparator(columnSeparator =  printOffset || printPartition || printHeaders || printKey || printValue)
+      writeSeparator(columnSeparator = printPartition || printOffset || printDelivery || printHeaders || printKey || printValue)
     }
 
     if (printPartition) {
       output.write(utfBytes("Partition:"))
       output.write(utfBytes(partition().toString))
-      writeSeparator(columnSeparator = printOffset || printHeaders || printKey || printValue)
+      writeSeparator(columnSeparator = printOffset || printDelivery || printHeaders || printKey || printValue)
     }
 
     if (printOffset) {
       output.write(utfBytes("Offset:"))
       output.write(utfBytes(offset().toString))
+      writeSeparator(columnSeparator = printDelivery || printHeaders || printKey || printValue)
+    }
+
+    if (printDelivery) {
+      output.write(utfBytes("Delivery:"))
+      if (deliveryCount().isPresent)
+        output.write(utfBytes(deliveryCount().get().toString))
+      else
+        output.write(utfBytes("NOT_PRESENT"))
       writeSeparator(columnSeparator = printHeaders || printKey || printValue)
     }
 

@@ -179,7 +179,7 @@ public class ProducerPerformanceTest {
         byte[] payload = null;
         SplittableRandom random = new SplittableRandom(0);
 
-        payload = ProducerPerformance.generateRandomPayload(recordSize, payloadByteList, payload, random);
+        payload = ProducerPerformance.generateRandomPayload(recordSize, payloadByteList, payload, random, false, 0L);
         assertEquals(inputString, new String(payload));
     }
 
@@ -190,7 +190,7 @@ public class ProducerPerformanceTest {
         List<byte[]> payloadByteList = new ArrayList<>();
         SplittableRandom random = new SplittableRandom(0);
 
-        payload = ProducerPerformance.generateRandomPayload(recordSize, payloadByteList, payload, random);
+        payload = ProducerPerformance.generateRandomPayload(recordSize, payloadByteList, payload, random, false, 0L);
         for (byte b : payload) {
             assertNotEquals(0, b);
         }
@@ -203,7 +203,7 @@ public class ProducerPerformanceTest {
         List<byte[]> payloadByteList = new ArrayList<>();
         SplittableRandom random = new SplittableRandom(0);
 
-        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> ProducerPerformance.generateRandomPayload(recordSize, payloadByteList, payload, random));
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> ProducerPerformance.generateRandomPayload(recordSize, payloadByteList, payload, random, false, 0L));
         assertEquals("no payload File Path or record Size provided", thrown.getMessage());
     }
 

@@ -62,7 +62,8 @@ public class ProducerPerformance {
             String topicName = res.getString("topic");
             long numRecords = res.getLong("numRecords");
             Integer recordSize = res.getInt("recordSize");
-            int throughput = res.getInt("throughput");
+            boolean payloadMonotonic = res.getBoolean("payloadMonotonic");
+            float throughput = res.getFloat("throughput");
             List<String> producerProps = res.getList("producerConfig");
             String producerConfig = res.getString("producerConfigFile");
             String payloadFilePath = res.getString("payloadFile");
@@ -104,7 +105,7 @@ public class ProducerPerformance {
             long transactionStartTime = 0;
             for (long i = 0; i < numRecords; i++) {
 
-                payload = generateRandomPayload(recordSize, payloadByteList, payload, random);
+                payload = generateRandomPayload(recordSize, payloadByteList, payload, random, payloadMonotonic, i);
 
                 if (transactionsEnabled && currentTransactionSize == 0) {
                     producer.beginTransaction();
@@ -170,12 +171,16 @@ public class ProducerPerformance {
     Stats stats;
 
     static byte[] generateRandomPayload(Integer recordSize, List<byte[]> payloadByteList, byte[] payload,
-            SplittableRandom random) {
+            SplittableRandom random, boolean payloadMonotonic, long recordCount) {
         if (!payloadByteList.isEmpty()) {
             payload = payloadByteList.get(random.nextInt(payloadByteList.size()));
         } else if (recordSize != null) {
-            for (int j = 0; j < payload.length; ++j)
-                payload[j] = (byte) (random.nextInt(26) + 65);
+            if (payloadMonotonic) {
+                payload = Long.toString(recordCount).getBytes(StandardCharsets.UTF_8);
+            } else {
+                for (int j = 0; j < payload.length; ++j)
+                    payload[j] = (byte) (random.nextInt(26) + 65);
+            }
         } else {
             throw new IllegalArgumentException("no payload File Path or record Size provided");
         }
@@ -284,9 +289,16 @@ public class ProducerPerformance {
         parser.addArgument("--throughput")
                 .action(store())
                 .required(true)
-                .type(Integer.class)
+                .type(Float.class)
                 .metavar("THROUGHPUT")
                 .help("throttle maximum message throughput to *approximately* THROUGHPUT messages/sec. Set this to -1 to disable throttling.");
+
+        parser.addArgument("--payload-monotonic")
+                .action(store())
+                .type(Boolean.class)
+                .metavar("PAYLOAD-MONOTONIC")
+                .dest("payloadMonotonic")
+                .help("payload is monotonically increasing integer");
 
         parser.addArgument("--producer-props")
                  .nargs("+")

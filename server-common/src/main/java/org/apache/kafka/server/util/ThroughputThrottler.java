@@ -43,7 +43,7 @@ public class ThroughputThrottler {
 
     private final long startMs;
     private final long sleepTimeNs;
-    private final long targetThroughput;
+    private final float targetThroughput;
 
     private long sleepDeficitNs = 0;
     private boolean wakeup = false;
@@ -52,11 +52,11 @@ public class ThroughputThrottler {
      * @param targetThroughput Can be messages/sec or bytes/sec
      * @param startMs          When the very first message is sent
      */
-    public ThroughputThrottler(long targetThroughput, long startMs) {
+    public ThroughputThrottler(float targetThroughput, long startMs) {
         this.startMs = startMs;
         this.targetThroughput = targetThroughput;
         this.sleepTimeNs = targetThroughput > 0 ?
-                           NS_PER_SEC / targetThroughput :
+                           (long) ((float)NS_PER_SEC / targetThroughput) :
                            Long.MAX_VALUE;
     }
 

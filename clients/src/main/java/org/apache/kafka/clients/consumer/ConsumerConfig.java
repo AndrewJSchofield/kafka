@@ -696,6 +696,24 @@ public class ConsumerConfig extends AbstractConfig {
         return newConfigs;
     }
 
+    public static Map<String, Object> appendDeserializerToShareConfig(Map<String, Object> configs,
+                                                                      Deserializer<?> keyDeserializer,
+                                                                      Deserializer<?> valueDeserializer) {
+        // validate deserializer configuration, if the passed deserializer instance is null, the user must explicitly set a valid deserializer configuration value
+        Map<String, Object> newConfigs = new HashMap<>(configs);
+        if (keyDeserializer != null)
+            newConfigs.put(KEY_DESERIALIZER_CLASS_CONFIG, keyDeserializer.getClass());
+        else if (newConfigs.get(KEY_DESERIALIZER_CLASS_CONFIG) == null)
+            throw new ConfigException(KEY_DESERIALIZER_CLASS_CONFIG, null, "must be non-null.");
+        if (valueDeserializer != null)
+            newConfigs.put(VALUE_DESERIALIZER_CLASS_CONFIG, valueDeserializer.getClass());
+        else if (newConfigs.get(VALUE_DESERIALIZER_CLASS_CONFIG) == null)
+            throw new ConfigException(VALUE_DESERIALIZER_CLASS_CONFIG, null, "must be non-null.");
+        // Disable auto-commit since share groups does not commit in the usual way
+        newConfigs.put(ENABLE_AUTO_COMMIT_CONFIG, false);
+        return newConfigs;
+    }
+
     private void maybeOverrideEnableAutoCommit(Map<String, Object> configs) {
         Optional<String> groupId = Optional.ofNullable(getString(CommonClientConfigs.GROUP_ID_CONFIG));
         Map<String, Object> originals = originals();

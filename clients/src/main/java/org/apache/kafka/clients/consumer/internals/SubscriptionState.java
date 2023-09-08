@@ -74,6 +74,8 @@ public class SubscriptionState {
 
     private final Logger log;
 
+    private String memberId;
+
     private enum SubscriptionType {
         NONE, AUTO_TOPICS, AUTO_PATTERN, USER_ASSIGNED
     }
@@ -107,6 +109,7 @@ public class SubscriptionState {
     public synchronized String toString() {
         return "SubscriptionState{" +
             "type=" + subscriptionType +
+            ", memberId=" + memberId +
             ", subscribedPattern=" + subscribedPattern +
             ", subscription=" + String.join(",", subscription) +
             ", groupSubscription=" + String.join(",", groupSubscription) +
@@ -131,6 +134,7 @@ public class SubscriptionState {
 
     public SubscriptionState(LogContext logContext, OffsetResetStrategy defaultResetStrategy) {
         this.log = logContext.logger(this.getClass());
+        this.memberId = null;
         this.defaultResetStrategy = defaultResetStrategy;
         this.subscription = new TreeSet<>(); // use a sorted set for better logging
         this.assignment = new PartitionStates<>();
@@ -138,6 +142,19 @@ public class SubscriptionState {
         this.subscribedPattern = null;
         this.subscriptionType = SubscriptionType.NONE;
     }
+
+    /**
+     * Sets the group member id.
+     * @param memberId The group member id
+     */
+    public synchronized void setMemberId(String memberId) {
+        this.memberId = memberId;
+    }
+
+    /**
+     * @return The group member id
+     */
+    public String memberId() { return memberId; }
 
     /**
      * Monotonically increasing id which is incremented after every assignment change. This can

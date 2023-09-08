@@ -37,6 +37,7 @@ import kafka.server.QuotaFactory;
 import kafka.server.ReplicaManager;
 import kafka.server.ReplicationQuotaManager;
 import kafka.server.SimpleApiVersionManager;
+import kafka.server.ShareManager;
 import kafka.server.ZkAdminManager;
 import kafka.server.ZkSupport;
 import kafka.server.builders.KafkaApisBuilder;
@@ -122,6 +123,7 @@ public class MetadataRequestBenchmark {
         clientQuotaManager, clientRequestQuotaManager, controllerMutationQuotaManager, replicaQuotaManager,
         replicaQuotaManager, replicaQuotaManager, Option.empty());
     private FetchManager fetchManager = Mockito.mock(FetchManager.class);
+    private ShareManager shareManager = Mockito.mock(ShareManager.class);
     private BrokerTopicStats brokerTopicStats = new BrokerTopicStats(Optional.empty());
     private KafkaPrincipal principal = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "test-user");
     private KafkaApis kafkaApis;
@@ -196,6 +198,7 @@ public class MetadataRequestBenchmark {
             setAuthorizer(Optional.empty()).
             setQuotas(quotaManagers).
             setFetchManager(fetchManager).
+            setShareManager(shareManager).
             setBrokerTopicStats(brokerTopicStats).
             setClusterId("clusterId").
             setTime(Time.SYSTEM).

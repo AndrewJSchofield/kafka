@@ -540,6 +540,13 @@ class KafkaServer(
           new FetchSessionCache(config.maxIncrementalFetchSessionCacheSlots,
             KafkaServer.MIN_INCREMENTAL_FETCH_SESSION_EVICTION_MS))
 
+        val shareManager = new ShareManager(config = config,
+          metrics = metrics,
+          time = Time.SYSTEM,
+          scheduler = new KafkaScheduler(1, true, "share-manager-"),
+          metadataCache = metadataCache,
+          replicaManager = replicaManager)
+
         // Start RemoteLogManager before broker start serving the requests.
         remoteLogManagerOpt.foreach { rlm =>
           val listenerName = config.remoteLogManagerConfig.remoteLogMetadataManagerListenerName()
@@ -572,6 +579,7 @@ class KafkaServer(
           authorizer = authorizer,
           quotas = quotaManagers,
           fetchManager = fetchManager,
+          shareManager = shareManager,
           brokerTopicStats = brokerTopicStats,
           clusterId = clusterId,
           time = time,
