@@ -340,7 +340,7 @@ object ConsoleShareConsumer extends Logging {
       val startTimeMs = time.milliseconds
       while (!recordIter.hasNext) {
         if (commitRequired) {
-          consumer.commitAsync()
+          consumer.commitSync()
           Thread.sleep(1000)
           commitRequired = false
         }

@@ -139,14 +139,6 @@ public class ShareFetchRequest extends AbstractRequest {
       return this;
     }
 
-//    public Builder metadata(FetchMetadata metadata) {
-//      if (metadata != null) {
-//        data.setSessionId(metadata.sessionId());
-//        data.setSessionEpoch(metadata.epoch());
-//      }
-//      return this;
-//    }
-
     public Builder removed(List<TopicIdPartition> removed) {
       return this;
     }

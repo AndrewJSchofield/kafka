@@ -559,8 +559,14 @@ public class ShareSessionHandler {
     if (response.error() != Errors.NONE) {
       log.info("Node {} was unable to process the acknowledge request with {}: {}.",
               node, nextMetadata, response.error());
+      if (response.error() == Errors.FETCH_SESSION_ID_NOT_FOUND) {
+        nextMetadata = FetchMetadata.INITIAL;
+      } else {
+        nextMetadata = nextMetadata.nextCloseExistingAttemptNew();
+      }
       return false;
     }
+    nextMetadata = nextMetadata.nextIncremental();
     return true;
   }
 

@@ -69,6 +69,7 @@ public class ShareFetcher<K, V> implements Closeable {
   private final Set<Integer> nodesWithPendingFetchRequests;
   private final Set<Integer> nodesWithPendingAcknowledgeRequests;
   private CompletedShareFetch<K, V> nextInLineFetch;
+  private Acknowledgements acknowledgements;
 
   private final AtomicBoolean isClosed = new AtomicBoolean(false);
 
@@ -94,6 +95,7 @@ public class ShareFetcher<K, V> implements Closeable {
     this.sessionHandlers = new HashMap<>();
     this.nodesWithPendingFetchRequests = new HashSet<>();
     this.nodesWithPendingAcknowledgeRequests = new HashSet<>();
+    this.acknowledgements = Acknowledgements.empty();
     this.metricsManager = metricsManager;
     this.time = time;
   }
@@ -243,7 +245,6 @@ public class ShareFetcher<K, V> implements Closeable {
 
       if (handler != null) {
         handler.handleError(e);
-//        handler.sessionTopicPartitions().forEach(subscriptions::clearPreferredReadReplica);
       }
     } finally {
       log.debug("Removing pending request for node {}", fetchTarget);
@@ -400,8 +401,7 @@ public class ShareFetcher<K, V> implements Closeable {
         continue;
       }
 
-      // Use the preferred read replica if set, otherwise the partition's leader
-      Node node = leaderOpt.get(); // selectReadReplica(partition, leaderOpt.get(), currentTimeMs);
+      Node node = leaderOpt.get();
 
       if (client.isUnavailable(node)) {
         client.maybeThrowAuthFailure(node);
@@ -410,7 +410,9 @@ public class ShareFetcher<K, V> implements Closeable {
         // going to be failed anyway before being sent, so skip sending the request for now
         log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
       } else if (nodesWithPendingFetchRequests.contains(node.id())) {
-        log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
+        log.trace("Skipping fetch for partition {} because previous fetch request to {} has not been processed", partition, node);
+      } else if (nodesWithPendingAcknowledgeRequests.contains(node.id())) {
+        log.trace("Skipping fetch for partition {} because previous acknowledge request to {} has not been processed", partition, node);
       } else {
         // if there is a leader and no in-flight requests, issue a new fetch
         ShareSessionHandler.Builder builder = fetchable.computeIfAbsent(node, k -> {
@@ -587,14 +589,8 @@ public class ShareFetcher<K, V> implements Closeable {
 
   /**
    * Sends a ShareAcknowledge request for all uncommitted acknowledgements.
-   *
-   * @param acknowledgements The uncommitted acknowledgements.
    */
-  public void acknowledge(Acknowledgements acknowledgements) {
-    sendAcknowledgements(acknowledgements);
-  }
-
-  public synchronized int sendAcknowledgements(Acknowledgements acknowledgements) {
+  public synchronized int sendAcknowledgements() {
     Map<Node, ShareSessionHandler.ShareAcknowledgeRequestData> acknowledgeRequestMap = prepareShareAcknowledgeRequests(acknowledgements);
 
     for (Map.Entry<Node, ShareSessionHandler.ShareAcknowledgeRequestData> entry : acknowledgeRequestMap.entrySet()) {
@@ -657,7 +653,9 @@ public class ShareFetcher<K, V> implements Closeable {
         // going to be failed anyway before being sent, so skip sending the request for now
         log.trace("Skipping acknowledge for partition {} because node {} is awaiting reconnect backoff", partition, node);
       } else if (nodesWithPendingAcknowledgeRequests.contains(node.id())) {
-        log.trace("Skipping acknowledge for partition {} because previous request to {} has not been processed", partition, node);
+        log.trace("Skipping acknowledge for partition {} because previous acknowledge request to {} has not been processed", partition, node);
+      } else if (nodesWithPendingFetchRequests.contains(node.id())) {
+        log.trace("Skipping acknowledge for partition {} because previous fetch request to {} has not been processed", partition, node);
       } else {
         // Build an AcknowledgementBatch for the topic-partition
         Map<Long, AcknowledgeType> ackMap = acknowledgements.forPartition(partition);
@@ -684,6 +682,8 @@ public class ShareFetcher<K, V> implements Closeable {
           if (ackBatch != null) {
             builder.add(partition, ackBatch);
           }
+
+          acknowledgements.clearForPartition(partition);
 
           log.debug("Added acknowledge request for partition {} to node {}", partition, node);
         }
@@ -746,6 +746,14 @@ public class ShareFetcher<K, V> implements Closeable {
     }
   }
 
+  public void mergeAcknowledgements(Acknowledgements additional) {
+    acknowledgements.merge(additional);
+  }
+
+  public boolean hasAcknowledgeRequestsInFlight() {
+    return !(nodesWithPendingAcknowledgeRequests.isEmpty() && acknowledgements.isEmpty());
+  }
+
   protected void handleAcknowledgeResponse(final Node fetchTarget, final RuntimeException e) {
     try {
       final ShareSessionHandler handler = sessionHandler(fetchTarget.id());
@@ -781,6 +789,7 @@ public class ShareFetcher<K, V> implements Closeable {
         return;
       }
 
+      // TO-DO: Needs to release acquired records
       final ShareFetchRequest.Builder request = createShareFetchRequest(fetchTarget, sessionHandler.newBuilder().build());
       final RequestFuture<ClientResponse> responseFuture = client.send(fetchTarget, request);
 
@@ -845,6 +854,5 @@ public class ShareFetcher<K, V> implements Closeable {
 
   private void requestMetadataUpdate(final TopicIdPartition topicPartition) {
     metadata.requestUpdate(false);
-//    subscriptions.clearPreferredReadReplica(topicPartition);
   }
 }

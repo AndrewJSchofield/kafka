@@ -48,6 +48,17 @@ public class Acknowledgements {
     }
   }
 
+  public void merge(Acknowledgements additional) {
+    additional.acknowledgements.forEach((partition, additionalAckMap) -> {
+      Map<Long, AcknowledgeType> existingAckMap = acknowledgements.get(partition);
+      if (existingAckMap != null) {
+        existingAckMap.putAll(additionalAckMap);
+      } else {
+        acknowledgements.put(partition, additionalAckMap);
+      }
+    });
+  }
+
   public List<TopicIdPartition> partitions() {
     LinkedList<TopicIdPartition> partitionList = new LinkedList<>();
     partitionList.addAll(acknowledgements.keySet());
@@ -56,6 +67,14 @@ public class Acknowledgements {
 
   public Map<Long, AcknowledgeType> forPartition(TopicIdPartition partition) {
     return acknowledgements.get(partition);
+  }
+
+  public void clearForPartition(TopicIdPartition partition) {
+    acknowledgements.remove(partition);
+  }
+
+  public boolean isEmpty() {
+    return acknowledgements.isEmpty();
   }
 
   public String toString() {

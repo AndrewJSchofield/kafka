@@ -107,6 +107,7 @@ public class KafkaShareConsumer<K, V> {
   private final ConsumerMetadata metadata;
   private final long retryBackoffMs;
   private final long requestTimeoutMs;
+  private final int defaultApiTimeoutMs;
   private volatile boolean closed = false;
   private final List<ConsumerPartitionAssignor> assignors;
 
@@ -211,6 +212,7 @@ public class KafkaShareConsumer<K, V> {
 
       log.debug("Initializing the Kafka share consumer");
       this.requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
+      this.defaultApiTimeoutMs = config.getInt(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG);
       this.time = Time.SYSTEM;
       this.metrics = buildMetrics(config, time, clientId);
       this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
@@ -345,6 +347,7 @@ public class KafkaShareConsumer<K, V> {
     this.metadata = metadata;
     this.retryBackoffMs = retryBackoffMs;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.defaultApiTimeoutMs = defaultApiTimeoutMs;
     this.assignors = assignors;
     this.groupId = groupId;
     this.kafkaConsumerMetrics = new KafkaConsumerMetrics(metrics, "consumer");
@@ -530,8 +533,11 @@ public class KafkaShareConsumer<K, V> {
   }
 
   private int sendFetches() {
-//    offsetFetcher.validatePositionsOnMetadataChange();
     return fetcher.sendFetches();
+  }
+
+  private int sendAcknowledgements() {
+    return fetcher.sendAcknowledgements();
   }
 
   boolean updateAssignmentMetadataIfNeeded(final Timer timer, final boolean waitForJoinGroup) {
@@ -539,7 +545,7 @@ public class KafkaShareConsumer<K, V> {
       return false;
     }
 
-    return true;//updateFetchPositions(timer);
+    return true;
   }
 
   /**
@@ -557,6 +563,7 @@ public class KafkaShareConsumer<K, V> {
 
     // send any new fetches (won't resend pending fetches)
     sendFetches();
+    sendAcknowledgements();
 
     // We do not want to be stuck blocking in poll if we are missing some positions
     // since the offset lookup may be backing off after a failure
@@ -599,7 +606,6 @@ public class KafkaShareConsumer<K, V> {
    * @param type The acknowledgement type
    */
   public void acknowledge(ConsumerRecord record, AcknowledgeType type) {
-    System.out.println("**** AJS : KafkaShareConsumer.acknowledge(" + record.offset() + "," + type.toString() + ") ****");
     acquireAndEnsureOpen();
     try {
       maybeThrowInvalidGroupIdException();
@@ -614,18 +620,38 @@ public class KafkaShareConsumer<K, V> {
     }
   }
 
-  /**
-   * Commit offsets returned on the last {@link #poll(Duration)} for all the subscribed list of topics and partition.
-   * @throws org.apache.kafka.common.errors.FencedInstanceIdException if this consumer instance gets fenced by broker.
-   */
-  public void commitAsync() {
+  public void commitSync() {
+    commitSync(Duration.ofMillis(defaultApiTimeoutMs));
+  }
+
+  public void commitSync(Duration timeout) {
     acquireAndEnsureOpen();
     try {
+      if (acknowledgements.isEmpty()) {
+        return;
+      }
+
+      Timer timer = time.timer(timeout);
+
       maybeThrowInvalidGroupIdException();
       log.debug("Committing acknowledgements: {}", acknowledgements);
-      System.out.println("**** AJS : KafkaShareConsumer.commitAsync(" + acknowledgements + ") ****");
-      fetcher.acknowledge(acknowledgements);
+
+      fetcher.mergeAcknowledgements(acknowledgements);
       acknowledgements = Acknowledgements.empty();
+
+      do {
+        client.maybeTriggerWakeup();
+
+        if (sendAcknowledgements() > 0 || client.hasPendingRequests()) {
+          client.transmitSends();
+        }
+
+        if (fetcher.hasAcknowledgeRequestsInFlight()) {
+          time.sleep(100);
+        } else {
+          break;
+        }
+      } while (timer.notExpired());
     } finally {
       release();
     }

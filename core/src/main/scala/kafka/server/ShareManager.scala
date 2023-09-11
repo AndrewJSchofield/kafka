@@ -82,6 +82,10 @@ class ShareManager(val config: KafkaConfig,
           if (reqMetadata.epoch == FINAL_EPOCH) {
             sessions.remove(reqMetadata.sessionId)
             session
+          } else if (reqMetadata.epoch == INITIAL_EPOCH) {
+            session.resetEpoch()
+            session.update(this, request, metadataCache.topicIdsToNames(), time.milliseconds())
+            session
           } else if (session.sessionEpoch != reqMetadata.epoch) {
             throw Errors.INVALID_FETCH_SESSION_EPOCH.exception()
           } else {
@@ -100,10 +104,14 @@ class ShareManager(val config: KafkaConfig,
         if (epoch == FINAL_EPOCH) {
           sessions.remove(sessionId)
           session
-        } else if (session.sessionEpoch != epoch) {
-          //          throw Errors.INVALID_FETCH_SESSION_EPOCH.exception()
+        } else if (epoch == INITIAL_EPOCH) {
+          session.resetEpoch()
+          session.update(this, time.milliseconds())
           session
+        } else if (session.sessionEpoch != epoch) {
+          throw Errors.INVALID_FETCH_SESSION_EPOCH.exception()
         } else {
+          session.update(this, time.milliseconds())
           session
         }
     }
@@ -205,6 +213,15 @@ class ShareSession(val groupId: String,
     lastUsedMs = now
   }
 
+  def resetEpoch(): Unit = synchronized {
+    sessionEpoch = FetchMetadata.INITIAL_EPOCH
+  }
+
+  def update(shareManager: ShareManager, now: Long): Unit = synchronized {
+    sessionEpoch = FetchMetadata.nextEpoch(sessionEpoch)
+    lastUsedMs = now
+  }
+
   def fetch(replicaManager: ReplicaManager,
             params: FetchParams,
             partitionsInfo: Seq[(TopicIdPartition, PartitionData)]
@@ -225,16 +242,13 @@ class ShareSession(val groupId: String,
       val sharePartition = sharePartitions.get(topicIdPartition)
       val ((recordBatch, acquiredRecords), fetchInfo) = sharePartition.beginFetch(partInfo.maxBytes, partInfo.currentLeaderEpoch)
       if (recordBatch != null) {
-        info("*** AJS : Record batch returned from beginFetch: " + recordBatch + ", acq: " + acquiredRecords + " ***")
         fetchResponseData += topicIdPartition -> (recordBatch, acquiredRecords)
       } else {
-        info("*** AJS : Record batch NOT returned from beginFetch ***")
         fetchInfos += topicIdPartition -> fetchInfo
       }
     }
 
     if (fetchInfos.nonEmpty) {
-      info("*** AJS : Non-empty fetchInfos => call replica manager ***")
       replicaManager.fetchMessages(
         params,
         fetchInfos,
@@ -242,7 +256,6 @@ class ShareSession(val groupId: String,
         fetchResponseCallback
       )
     } else {
-      info("*** AJS : Empty fetchInfos => complete future ***")
       future.complete(fetchResponseData)
     }
 
@@ -323,9 +336,7 @@ class SharePartition(val groupId: String,
   // The number of in-flight records
   var inFlightRecordCount = 0
   // This can be exceeded slightly by up to one bunch of RecordBatch
-  val MAX_IN_FLIGHT_RECORDS = 10
-  // Whether a fetch is pending for this share-partition - only one is allowed at a time to start with
-  var pendingFetch = false
+  val MAX_IN_FLIGHT_RECORDS = 200
   // A map of the delivery states of the in-flight records - ripe for optimisation later
   var recordCache = new util.concurrent.ConcurrentSkipListMap[Long, SharePartitionCachedRecord]()
 
@@ -335,7 +346,6 @@ class SharePartition(val groupId: String,
     val acquiredRecords = new util.LinkedList[ShareFetchResponseData.AcquiredRecords]
 
     // Check whether there are any available records, in which case just return the batch in hand
-    info("*** AJS : beginFetch availableRecordCount: " + availableRecordCount + ", startOffset: " + startOffset + ", endOffset: " + endOffset + " ****" )
     if (availableRecordCount > 0) {
       var fetchPartitionData: FetchPartitionData = null
       // Find the first available record
@@ -352,34 +362,28 @@ class SharePartition(val groupId: String,
           for (offset <- batch.baseOffset() until batch.nextOffset()) {
             val cachedRecord = recordCache.get(offset)
             if (cachedRecord.isAvailable) {
-              info("*** AJS : found AVAILABLE record ***")
               cachedRecord.acquire()
               availableRecordCount -= 1
               val deliveryCount = cachedRecord.deliveryCount.toShort
               if (acquired == null) {
-                info("*** AJS : acquired is null => MAKE NEW ACQUIRED ***")
                 acquired = new ShareFetchResponseData.AcquiredRecords()
                 acquired.setBaseOffset(offset)
                 acquired.setDeliveryCount(deliveryCount)
               } else if ((offset != acquired.lastOffset() + 1) ||
                 (deliveryCount != acquired.deliveryCount())) {
-                info("*** AJS : acquired is non-null BUT MAKE NEW ACQUIRED ***")
                 acquiredRecords.add(acquired)
 
                 acquired = new ShareFetchResponseData.AcquiredRecords()
                 acquired.setBaseOffset(offset)
                 acquired.setDeliveryCount(deliveryCount)
               } else {
-                info("*** AJS : acquired is non-null ***")
               }
               acquired.setLastOffset(offset)
             } else {
-              info("*** AJS : did not found AVAILABLE record ***")
             }
           }
           if (acquired != null) {
             acquiredRecords.add(acquired)
-            info("*** AJS : Added acquired records for return " + fetchPartitionData + " ***")
           }
         }
 
@@ -389,10 +393,7 @@ class SharePartition(val groupId: String,
 
     // First, check whether the number of in-flight records reached the limit
     if (inFlightRecordCount >= MAX_IN_FLIGHT_RECORDS) {
-      info("*** AJS : IN-FLIGHT RECORD COUNT EXCEEDS LIMIT " + inFlightRecordCount)
       tidyRecordCache()
-      info("*** AJS : IN-FLIGHT RECORD COUNT AFTER TIDY " + inFlightRecordCount)
-      dumpRecordCache()
       return ((new FetchPartitionData(Errors.NONE,
         0,
         0,
@@ -404,19 +405,6 @@ class SharePartition(val groupId: String,
         false), acquiredRecords), null)
     }
 
-    //    // Then, if there's a pending fetch, also return nothing for now, to keep the code simpler
-//    if (pendingFetch)
-//      return ((new FetchPartitionData(Errors.NONE,
-//        0,
-//        0,
-//        MemoryRecords.EMPTY,
-//        Optional.empty(),
-//        OptionalLong.of(0),
-//        Optional.empty(),
-//        OptionalInt.empty,
-//        false), acquiredRecords), null)
-//
-//    pendingFetch = true
     val fetchInfo = new FetchRequest.PartitionData(
       topicId,
       endOffset,
@@ -431,7 +419,6 @@ class SharePartition(val groupId: String,
   // cache and returns a batch of them acquired for the caller.
   // Does not handle log compaction, control records. Assumes gapless offsets.
   def completeFetch(fetchPartitionData: FetchPartitionData): (FetchPartitionData, util.List[ShareFetchResponseData.AcquiredRecords]) = synchronized {
-//    pendingFetch = false
     if (fetchPartitionData != null) {
       fetchPartitionData.records.batches().forEach { batch =>
         val baseOffset = batch.baseOffset()
@@ -466,26 +453,28 @@ class SharePartition(val groupId: String,
           val nextOffset = batch.nextOffset()
           for (offset <- baseOffset until nextOffset) {
             val cachedRecord = recordCache.get(offset)
-            cachedRecord.acquire()
-            availableRecordCount -= 1
-            val deliveryCount = cachedRecord.deliveryCount.toShort
+            if (cachedRecord.isAvailable) {
+              cachedRecord.acquire()
+              availableRecordCount -= 1
+              val deliveryCount = cachedRecord.deliveryCount.toShort
 
-            if (acquired == null) {
-              acquired = new ShareFetchResponseData.AcquiredRecords()
-              acquired.setBaseOffset(offset)
-              acquired.setDeliveryCount(deliveryCount)
-            } else if ((offset != acquired.lastOffset() + 1) ||
-              (deliveryCount != acquired.deliveryCount())) {
-              acquiredRecords.add(acquired)
+              if (acquired == null) {
+                acquired = new ShareFetchResponseData.AcquiredRecords()
+                acquired.setBaseOffset(offset)
+                acquired.setDeliveryCount(deliveryCount)
+              } else if ((offset != acquired.lastOffset() + 1) ||
+                (deliveryCount != acquired.deliveryCount())) {
+                acquiredRecords.add(acquired)
 
-              acquired = new ShareFetchResponseData.AcquiredRecords()
-              acquired.setBaseOffset(offset)
-              acquired.setDeliveryCount(deliveryCount)
+                acquired = new ShareFetchResponseData.AcquiredRecords()
+                acquired.setBaseOffset(offset)
+                acquired.setDeliveryCount(deliveryCount)
+              }
+              acquired.setLastOffset(offset)
             }
-            acquired.setLastOffset(offset)
           }
         }
-        acquiredRecords.add(acquired)
+        if (acquired != null) acquiredRecords.add(acquired)
       }
     }
 
@@ -505,8 +494,6 @@ class SharePartition(val groupId: String,
 
   def acknowledge(ackBatches: util.List[ShareAcknowledgeRequestData.AcknowledgementBatch]): Boolean = synchronized {
     var success = true
-
-    val startingAvailableRecordCount = availableRecordCount
 
     // Pass 1: validate the requested acknowledgements
     var batchIterator = ackBatches.iterator()
@@ -556,8 +543,6 @@ class SharePartition(val groupId: String,
             inFlightRecordCount -= 1
           }
         })
-
-        info("*** AJS : ackType:" + batch.acknowledgeType() + ", startingAvail: " + startingAvailableRecordCount + ", endingAvail: " + availableRecordCount + " ***")
       }
 
       if (tidy)
@@ -590,16 +575,6 @@ class SharePartition(val groupId: String,
 
     if (newOffset > startOffset) {
       startOffset = newOffset
-    }
-  }
-
-  def dumpRecordCache(): Unit = synchronized {
-    val keySet = recordCache.navigableKeySet()
-    val it = keySet.iterator()
-    while (it.hasNext) {
-      val thisOffset = it.next()
-      val cachedRecord = recordCache.get(thisOffset)
-      info("*** AJS : CACHE -> " + thisOffset + " -> " + cachedRecord.deliveryState)
     }
   }
 }
