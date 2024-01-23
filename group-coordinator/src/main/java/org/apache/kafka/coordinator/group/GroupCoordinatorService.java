@@ -50,6 +50,8 @@ import org.apache.kafka.common.message.OffsetDeleteRequestData;
 import org.apache.kafka.common.message.OffsetDeleteResponseData;
 import org.apache.kafka.common.message.OffsetFetchRequestData;
 import org.apache.kafka.common.message.OffsetFetchResponseData;
+import org.apache.kafka.common.message.ShareGroupHeartbeatRequestData;
+import org.apache.kafka.common.message.ShareGroupHeartbeatResponseData;
 import org.apache.kafka.common.message.SyncGroupRequestData;
 import org.apache.kafka.common.message.SyncGroupResponseData;
 import org.apache.kafka.common.message.TxnOffsetCommitRequestData;
@@ -325,6 +327,52 @@ public class GroupCoordinatorService implements GroupCoordinator {
             return new ConsumerGroupHeartbeatResponseData()
                 .setErrorCode(Errors.forException(exception).code())
                 .setErrorMessage(exception.getMessage());
+        });
+    }
+
+    /**
+     * See {@link GroupCoordinator#shareGroupHeartbeat(RequestContext, ShareGroupHeartbeatRequestData)}.
+     */
+    @Override
+    public CompletableFuture<ShareGroupHeartbeatResponseData> shareGroupHeartbeat(
+            RequestContext context,
+            ShareGroupHeartbeatRequestData request
+    ) {
+        if (!isActive.get()) {
+            return CompletableFuture.completedFuture(new ShareGroupHeartbeatResponseData()
+                    .setErrorCode(Errors.COORDINATOR_NOT_AVAILABLE.code())
+            );
+        }
+
+        return runtime.scheduleWriteOperation(
+                "consumer-group-heartbeat",
+                topicPartitionFor(request.groupId()),
+                Duration.ofMillis(config.offsetCommitTimeoutMs),
+                coordinator -> coordinator.shareGroupHeartbeat(context, request)
+        ).exceptionally(exception -> {
+            if (exception instanceof UnknownTopicOrPartitionException ||
+                    exception instanceof NotEnoughReplicasException ||
+                    exception instanceof TimeoutException) {
+                return new ShareGroupHeartbeatResponseData()
+                        .setErrorCode(Errors.COORDINATOR_NOT_AVAILABLE.code());
+            }
+
+            if (exception instanceof NotLeaderOrFollowerException ||
+                    exception instanceof KafkaStorageException) {
+                return new ShareGroupHeartbeatResponseData()
+                        .setErrorCode(Errors.NOT_COORDINATOR.code());
+            }
+
+            if (exception instanceof RecordTooLargeException ||
+                    exception instanceof RecordBatchTooLargeException ||
+                    exception instanceof InvalidFetchSizeException) {
+                return new ShareGroupHeartbeatResponseData()
+                        .setErrorCode(Errors.UNKNOWN_SERVER_ERROR.code());
+            }
+
+            return new ShareGroupHeartbeatResponseData()
+                    .setErrorCode(Errors.forException(exception).code())
+                    .setErrorMessage(exception.getMessage());
         });
     }
 

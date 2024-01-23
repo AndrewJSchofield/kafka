@@ -19,7 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListenerCallbackCompletedEvent;
 import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
+import org.apache.kafka.common.protocol.ApiMessage;
 
 import java.util.Map;
 import java.util.Optional;
@@ -73,7 +73,7 @@ public interface MembershipManager {
      *
      * @param response Heartbeat response to extract member info and errors from.
      */
-    void onHeartbeatResponseReceived(ConsumerGroupHeartbeatResponseData response);
+    void onHeartbeatResponseReceived(ApiMessage response);
 
     /**
      * Update state when a heartbeat is sent out. This will transition out of the states that end

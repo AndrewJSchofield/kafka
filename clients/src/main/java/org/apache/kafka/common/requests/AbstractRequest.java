@@ -328,6 +328,8 @@ public abstract class AbstractRequest implements AbstractRequestResponse {
                 return ShareFetchRequest.parse(buffer, apiVersion);
             case SHARE_ACKNOWLEDGE:
                 return ShareAcknowledgeRequest.parse(buffer, apiVersion);
+            case SHARE_GROUP_HEARTBEAT:
+                return ShareGroupHeartbeatRequest.parse(buffer, apiVersion);
             default:
                 throw new AssertionError(String.format("ApiKey %s is not currently handled in `parseRequest`, the " +
                         "code should be updated to do so.", apiKey));

@@ -51,6 +51,8 @@ public class RequestManagers implements Closeable {
     public final OffsetsRequestManager offsetsRequestManager;
     public final TopicMetadataRequestManager topicMetadataRequestManager;
     public final FetchRequestManager fetchRequestManager;
+    public final ShareFetchRequestManager shareFetchRequestManager;
+
     private final List<Optional<? extends RequestManager>> entries;
     private final IdempotentCloser closer = new IdempotentCloser();
 
@@ -62,11 +64,12 @@ public class RequestManagers implements Closeable {
                            Optional<CommitRequestManager> commitRequestManager,
                            Optional<HeartbeatRequestManager> heartbeatRequestManager) {
         this.log = logContext.logger(RequestManagers.class);
-        this.offsetsRequestManager = requireNonNull(offsetsRequestManager, "OffsetsRequestManager cannot be null");
+        this.offsetsRequestManager = offsetsRequestManager;
         this.coordinatorRequestManager = coordinatorRequestManager;
         this.commitRequestManager = commitRequestManager;
         this.topicMetadataRequestManager = topicMetadataRequestManager;
         this.fetchRequestManager = fetchRequestManager;
+        this.shareFetchRequestManager = null;
         this.heartbeatRequestManager = heartbeatRequestManager;
 
         List<Optional<? extends RequestManager>> list = new ArrayList<>();
@@ -76,6 +79,30 @@ public class RequestManagers implements Closeable {
         list.add(Optional.of(offsetsRequestManager));
         list.add(Optional.of(topicMetadataRequestManager));
         list.add(Optional.of(fetchRequestManager));
+        entries = Collections.unmodifiableList(list);
+    }
+
+    // This variant is for share groups
+    public RequestManagers(LogContext logContext,
+                           TopicMetadataRequestManager topicMetadataRequestManager,
+                           ShareFetchRequestManager shareFetchRequestManager,
+                           Optional<CoordinatorRequestManager> coordinatorRequestManager,
+                           Optional<HeartbeatRequestManager> heartbeatRequestManager) {
+        this.log = logContext.logger(RequestManagers.class);
+        this.offsetsRequestManager = null;
+        this.coordinatorRequestManager = coordinatorRequestManager;
+        this.commitRequestManager = Optional.empty();
+        this.topicMetadataRequestManager = topicMetadataRequestManager;
+        this.fetchRequestManager = null;
+        this.shareFetchRequestManager = shareFetchRequestManager;
+        this.heartbeatRequestManager = heartbeatRequestManager;
+
+        List<Optional<? extends RequestManager>> list = new ArrayList<>();
+        list.add(coordinatorRequestManager);
+        list.add(commitRequestManager);
+        list.add(heartbeatRequestManager);
+        list.add(Optional.of(topicMetadataRequestManager));
+        list.add(Optional.of(shareFetchRequestManager));
         entries = Collections.unmodifiableList(list);
     }
 
@@ -195,6 +222,80 @@ public class RequestManagers implements Closeable {
                         fetch,
                         Optional.ofNullable(coordinator),
                         Optional.ofNullable(commit),
+                        Optional.ofNullable(heartbeatRequestManager)
+                );
+            }
+        };
+    }
+
+    /**
+     * Creates a {@link Supplier} for deferred creation during invocation by
+     * {@link ConsumerNetworkThread}.
+     */
+    public static Supplier<RequestManagers> supplierForShareGroup(final Time time,
+                                                     final LogContext logContext,
+                                                     final BackgroundEventHandler backgroundEventHandler,
+                                                     final ConsumerMetadata metadata,
+                                                     final SubscriptionState subscriptions,
+                                                     final ShareFetchBuffer fetchBuffer,
+                                                     final ConsumerConfig config,
+                                                     final GroupRebalanceConfig groupRebalanceConfig,
+                                                     final ApiVersions apiVersions,
+                                                     final FetchMetricsManager fetchMetricsManager,
+                                                     final Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
+                                                     final Optional<ClientTelemetryReporter> clientTelemetryReporter) {
+        return new CachedSupplier<RequestManagers>() {
+            @Override
+            protected RequestManagers create() {
+                final NetworkClientDelegate networkClientDelegate = networkClientDelegateSupplier.get();
+                final FetchConfig fetchConfig = new FetchConfig(config);
+                long retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
+                long retryBackoffMaxMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MAX_MS_CONFIG);
+                final int requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
+                final ShareFetchRequestManager fetch = new ShareFetchRequestManager(logContext,
+                        time,
+                        groupRebalanceConfig.groupId,
+                        metadata,
+                        subscriptions,
+                        fetchConfig,
+                        fetchBuffer,
+                        fetchMetricsManager);
+                final TopicMetadataRequestManager topic = new TopicMetadataRequestManager(
+                        logContext,
+                        config);
+                HeartbeatRequestManager heartbeatRequestManager = null;
+                MembershipManager membershipManager = null;
+                CoordinatorRequestManager coordinator = null;
+
+                final GroupState groupState = new GroupState(groupRebalanceConfig);
+                coordinator = new CoordinatorRequestManager(time,
+                        logContext,
+                        retryBackoffMs,
+                        retryBackoffMaxMs,
+                        backgroundEventHandler,
+                        groupState.groupId);
+                membershipManager = new ShareGroupMembershipManagerImpl(
+                        groupState.groupId,
+                        groupState.groupInstanceId,
+                        subscriptions,
+                        metadata,
+                        logContext,
+                        clientTelemetryReporter,
+                        backgroundEventHandler);
+                heartbeatRequestManager = new HeartbeatRequestManager(
+                        logContext,
+                        time,
+                        config,
+                        coordinator,
+                        subscriptions,
+                        membershipManager,
+                        backgroundEventHandler);
+
+                return new RequestManagers(
+                        logContext,
+                        topic,
+                        fetch,
+                        Optional.ofNullable(coordinator),
                         Optional.ofNullable(heartbeatRequestManager)
                 );
             }

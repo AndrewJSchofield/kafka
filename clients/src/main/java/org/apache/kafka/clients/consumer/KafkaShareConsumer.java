@@ -81,7 +81,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * A client that consumes records from a Kafka cluster using a share group.
  */
-public class KafkaShareConsumer<K, V> {
+public class KafkaShareConsumer<K, V> implements ShareConsumer<K, V> {
 
   private static final String CLIENT_ID_METRIC_TAG = "client-id";
   private static final long NO_CURRENT_THREAD = -1L;
@@ -382,7 +382,7 @@ public class KafkaShareConsumer<K, V> {
   /**
    * Subscribe to the given list of topics to get dynamically
    * assigned partitions. <b>Topic subscriptions are not incremental. This list will replace the current
-   * assignment (if there is one).
+   * assignment (if there is one).</b>
    *
    * If the given list of topics is empty, it is treated the same as {@link #unsubscribe()}.
    *
@@ -589,7 +589,7 @@ public class KafkaShareConsumer<K, V> {
 
   /**
    * Acknowledge successful delivery of a record returned on the last {@link #poll(Duration) poll()}. The
-   * acknowledgement is committed on the next {@link #commitSync()} or {@link #commitAsync()} call.
+   * acknowledgement is committed on the next {@link #commitSync()} call.
    *
    * @param record The record whose delivery is being acknowledged
    */
@@ -599,8 +599,7 @@ public class KafkaShareConsumer<K, V> {
 
   /**
    * Acknowledge delivery of a record returned on the last {@link #poll(Duration) poll()} indicating whether
-   * it was processed successfully. The acknowledgement is committed on the next {@link #commitSync()} or
-   * {@link #commitAsync()} call.
+   * it was processed successfully. The acknowledgement is committed on the next {@link #commitSync()} call.
    *
    * @param record The record whose delivery is being acknowledged
    * @param type The acknowledgement type

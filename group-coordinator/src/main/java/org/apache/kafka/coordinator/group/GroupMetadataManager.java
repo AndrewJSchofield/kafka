@@ -45,6 +45,8 @@ import org.apache.kafka.common.message.LeaveGroupRequestData.MemberIdentity;
 import org.apache.kafka.common.message.LeaveGroupResponseData;
 import org.apache.kafka.common.message.LeaveGroupResponseData.MemberResponse;
 import org.apache.kafka.common.message.ListGroupsResponseData;
+import org.apache.kafka.common.message.ShareGroupHeartbeatRequestData;
+import org.apache.kafka.common.message.ShareGroupHeartbeatResponseData;
 import org.apache.kafka.common.message.SyncGroupRequestData;
 import org.apache.kafka.common.message.SyncGroupResponseData;
 import org.apache.kafka.common.protocol.Errors;
@@ -80,6 +82,8 @@ import org.apache.kafka.coordinator.group.generic.GenericGroupState;
 import org.apache.kafka.coordinator.group.metrics.GroupCoordinatorMetricsShard;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorResult;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorTimer;
+import org.apache.kafka.coordinator.group.share.ShareGroup;
+import org.apache.kafka.coordinator.group.share.ShareGroupMember;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.TopicImage;
@@ -111,6 +115,7 @@ import static org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest.LEA
 import static org.apache.kafka.common.requests.JoinGroupRequest.UNKNOWN_MEMBER_ID;
 import static org.apache.kafka.coordinator.group.Group.GroupType.CONSUMER;
 import static org.apache.kafka.coordinator.group.Group.GroupType.GENERIC;
+import static org.apache.kafka.coordinator.group.Group.GroupType.SHARE;
 import static org.apache.kafka.coordinator.group.RecordHelpers.newCurrentAssignmentRecord;
 import static org.apache.kafka.coordinator.group.RecordHelpers.newCurrentAssignmentTombstoneRecord;
 import static org.apache.kafka.coordinator.group.RecordHelpers.newGroupEpochRecord;
@@ -310,6 +315,11 @@ public class GroupMetadataManager {
      * The default assignor used.
      */
     private final PartitionAssignor defaultAssignor;
+
+    /**
+     * The assignor for share groups. Not configurable initially.
+     */
+    private final PartitionAssignor shareGroupAssignor = new org.apache.kafka.coordinator.group.share.SimpleAssignor();
 
     /**
      * The generic and consumer groups keyed by their name.
@@ -589,6 +599,45 @@ public class GroupMetadataManager {
     }
 
     /**
+     * Gets or maybe creates a share group.
+     *
+     * @param groupId           The group id.
+     * @param createIfNotExists A boolean indicating whether the group should be
+     *                          created if it does not exist.
+     *
+     * @return A ShareGroup.
+     * @throws GroupIdNotFoundException if the group does not exist and createIfNotExists is false or
+     *                                  if the group is not a consumer group.
+     *
+     * Package private for testing.
+     */
+    ShareGroup getOrMaybeCreateShareGroup(
+            String groupId,
+            boolean createIfNotExists
+    ) throws GroupIdNotFoundException {
+        Group group = groups.get(groupId);
+
+        if (group == null && !createIfNotExists) {
+            throw new GroupIdNotFoundException(String.format("Share group %s not found.", groupId));
+        }
+
+        if (group == null) {
+            ShareGroup shareGroup = new ShareGroup(snapshotRegistry, groupId, metrics);
+            groups.put(groupId, shareGroup);
+//            metrics.onConsumerGroupStateTransition(null, shareGroup.state());
+            return shareGroup;
+        } else {
+            if (group.type() == SHARE) {
+                return (ShareGroup) group;
+            } else {
+                // We don't support upgrading/downgrading between protocols at the moment so
+                // we throw an exception if a group exists with the wrong type.
+                throw new GroupIdNotFoundException(String.format("Group %s is not a share group.", groupId));
+            }
+        }
+    }
+
+    /**
      * Gets or maybe creates a generic group.
      *
      * @param groupId           The group id.
@@ -791,6 +840,34 @@ public class GroupMetadataManager {
     }
 
     /**
+     * Validates the request.
+     *
+     * @param request The request to validate.
+     *
+     * @throws InvalidRequestException if the request is not valid.
+     * @throws UnsupportedAssignorException if the assignor is not supported.
+     */
+    private void throwIfShareGroupHeartbeatRequestIsInvalid(
+            ShareGroupHeartbeatRequestData request
+    ) throws InvalidRequestException, UnsupportedAssignorException {
+        throwIfEmptyString(request.groupId(), "GroupId can't be empty.");
+        throwIfEmptyString(request.rackId(), "RackId can't be empty.");
+
+        if (request.memberEpoch() > 0 || request.memberEpoch() == LEAVE_GROUP_MEMBER_EPOCH) {
+            throwIfEmptyString(request.memberId(), "MemberId can't be empty.");
+        } else if (request.memberEpoch() == 0) {
+            if (request.rebalanceTimeoutMs() == -1) {
+                throw new InvalidRequestException("RebalanceTimeoutMs must be provided in first request.");
+            }
+            if (request.subscribedTopicNames() == null || request.subscribedTopicNames().isEmpty()) {
+                throw new InvalidRequestException("SubscribedTopicNames must be set in first request.");
+            }
+        } else {
+            throw new InvalidRequestException("MemberEpoch is invalid.");
+        }
+    }
+
+    /**
      * Verifies that the partitions currently owned by the member (the ones set in the
      * request) matches the ones that the member should own. It matches if the consumer
      * only owns partitions which are in the assigned partitions. It does not match if
@@ -840,6 +917,27 @@ public class GroupMetadataManager {
     }
 
     /**
+     * Checks whether the share group can accept a new member or not based on the
+     * max group size defined.
+     *
+     * @param group     The share group.
+     * @param memberId  The member id.
+     *
+     * @throws GroupMaxSizeReachedException if the maximum capacity has been reached.
+     */
+    private void throwIfShareGroupIsFull(
+            ShareGroup group,
+            String memberId
+    ) throws GroupMaxSizeReachedException {
+        // If the share group has reached its maximum capacity, the member is rejected if it is not
+        // already a member of the share group.
+        if (group.numMembers() >= consumerGroupMaxSize && (memberId.isEmpty() || !group.hasMember(memberId))) {
+            throw new GroupMaxSizeReachedException("The share group has reached its maximum capacity of "
+                    + consumerGroupMaxSize + " members.");
+        }
+    }
+
+    /**
      * Validates the member epoch provided in the heartbeat request.
      *
      * @param member                The consumer group member.
@@ -849,7 +947,7 @@ public class GroupMetadataManager {
      * @throws FencedMemberEpochException if the provided epoch is ahead or behind the epoch known
      *                                    by this coordinator.
      */
-    private void throwIfMemberEpochIsInvalid(
+    private void throwIfConsumerGroupMemberEpochIsInvalid(
         ConsumerGroupMember member,
         int receivedMemberEpoch,
         List<ConsumerGroupHeartbeatRequestData.TopicPartitions> ownedTopicPartitions
@@ -866,6 +964,17 @@ public class GroupMetadataManager {
                     + "epoch (" + receivedMemberEpoch + ") than the one known by the group coordinator ("
                     + member.memberEpoch() + "). The member must abandon all its partitions and rejoin.");
             }
+        }
+    }
+
+    private void throwIfShareGroupMemberEpochIsInvalid(
+            ShareGroupMember member,
+            int receivedMemberEpoch
+    ) {
+        if (receivedMemberEpoch > member.memberEpoch()) {
+            throw new FencedMemberEpochException("The share group member has a greater member "
+                    + "epoch (" + receivedMemberEpoch + ") than the one known by the group coordinator ("
+                    + member.memberEpoch() + "). The member must abandon all its partitions and rejoin.");
         }
     }
 
@@ -922,18 +1031,35 @@ public class GroupMetadataManager {
         }
     }
 
-    private ConsumerGroupHeartbeatResponseData.Assignment createResponseAssignment(
+    private ConsumerGroupHeartbeatResponseData.Assignment createConsumerGroupResponseAssignment(
         ConsumerGroupMember member
     ) {
         return new ConsumerGroupHeartbeatResponseData.Assignment()
-            .setTopicPartitions(fromAssignmentMap(member.assignedPartitions()));
+            .setTopicPartitions(fromConsumerGroupAssignmentMap(member.assignedPartitions()));
     }
 
-    private List<ConsumerGroupHeartbeatResponseData.TopicPartitions> fromAssignmentMap(
+    private List<ConsumerGroupHeartbeatResponseData.TopicPartitions> fromConsumerGroupAssignmentMap(
+            Map<Uuid, Set<Integer>> assignment
+    ) {
+        return assignment.entrySet().stream()
+                .map(keyValue -> new ConsumerGroupHeartbeatResponseData.TopicPartitions()
+                        .setTopicId(keyValue.getKey())
+                        .setPartitions(new ArrayList<>(keyValue.getValue())))
+                .collect(Collectors.toList());
+    }
+
+    private ShareGroupHeartbeatResponseData.Assignment createShareGroupResponseAssignment(
+        ShareGroupMember member
+    ) {
+        return new ShareGroupHeartbeatResponseData.Assignment()
+                .setTopicPartitions(fromShareGroupAssignmentMap(member.assignedPartitions()));
+    }
+
+    private List<ShareGroupHeartbeatResponseData.TopicPartitions> fromShareGroupAssignmentMap(
         Map<Uuid, Set<Integer>> assignment
     ) {
         return assignment.entrySet().stream()
-            .map(keyValue -> new ConsumerGroupHeartbeatResponseData.TopicPartitions()
+            .map(keyValue -> new ShareGroupHeartbeatResponseData.TopicPartitions()
                 .setTopicId(keyValue.getKey())
                 .setPartitions(new ArrayList<>(keyValue.getValue())))
             .collect(Collectors.toList());
@@ -992,7 +1118,7 @@ public class GroupMetadataManager {
         boolean staticMemberReplaced = false;
         if (instanceId == null) {
             member = group.getOrMaybeCreateMember(memberId, createIfNotExists);
-            throwIfMemberEpochIsInvalid(member, memberEpoch, ownedTopicPartitions);
+            throwIfConsumerGroupMemberEpochIsInvalid(member, memberEpoch, ownedTopicPartitions);
             if (createIfNotExists) {
                 log.info("[GroupId {}] Member {} joins the consumer group.", groupId, memberId);
             }
@@ -1020,7 +1146,7 @@ public class GroupMetadataManager {
             } else {
                 throwIfStaticMemberIsUnknown(member, instanceId);
                 throwIfInstanceIdIsFenced(member, groupId, memberId, instanceId);
-                throwIfMemberEpochIsInvalid(member, memberEpoch, ownedTopicPartitions);
+                throwIfConsumerGroupMemberEpochIsInvalid(member, memberEpoch, ownedTopicPartitions);
                 updatedMemberBuilder = new ConsumerGroupMember.Builder(member);
             }
         }
@@ -1179,7 +1305,180 @@ public class GroupMetadataManager {
         // 2. The member just joined or rejoined to group (epoch equals to zero);
         // 3. The member's assignment has been updated.
         if (ownedTopicPartitions != null || memberEpoch == 0 || assignmentUpdated) {
-            response.setAssignment(createResponseAssignment(updatedMember));
+            response.setAssignment(createConsumerGroupResponseAssignment(updatedMember));
+        }
+
+        return new CoordinatorResult<>(records, response);
+    }
+
+    /**
+     * Handles a regular heartbeat from a share group member. It mainly consists of
+     * three parts:
+     * 1) The member is created or updated. The group epoch is bumped if the member
+     *    has been created or updated.
+     * 2) The target assignment for the share group is updated if the group epoch
+     *    is larger than the current target assignment epoch.
+     * 3) The member's assignment is reconciled with the target assignment.
+     *
+     * @param groupId               The group id from the request.
+     * @param memberId              The member id from the request.
+     * @param memberEpoch           The member epoch from the request.
+     * @param rackId                The rack id from the request or null.
+     * @param rebalanceTimeoutMs    The rebalance timeout from the request or -1.
+     * @param clientId              The client id.
+     * @param clientHost            The client host.
+     * @param subscribedTopicNames  The list of subscribed topic names from the request
+     *                              or null.
+     *
+     * @return A Result containing the ShareGroupHeartbeat response and
+     *         a list of records to update the state machine.
+     */
+    private CoordinatorResult<ShareGroupHeartbeatResponseData, Record> shareGroupHeartbeat(
+            String groupId,
+            String memberId,
+            int memberEpoch,
+            String rackId,
+            int rebalanceTimeoutMs,
+            String clientId,
+            String clientHost,
+            List<String> subscribedTopicNames
+    ) throws ApiException {
+        final long currentTimeMs = time.milliseconds();
+        final List<Record> records = new ArrayList<>();
+
+        // Get or create the share group.
+        boolean createIfNotExists = memberEpoch == 0;
+        final ShareGroup group = getOrMaybeCreateShareGroup(groupId, createIfNotExists);
+        throwIfShareGroupIsFull(group, memberId);
+
+        // Get or create the member.
+        if (memberId.isEmpty()) memberId = Uuid.randomUuid().toString();
+        ShareGroupMember member;
+        ShareGroupMember.Builder updatedMemberBuilder;
+        member = group.getOrMaybeCreateMember(memberId, createIfNotExists);
+        throwIfShareGroupMemberEpochIsInvalid(member, memberEpoch);
+        if (createIfNotExists) {
+            log.info("[GroupId {}] Member {} joins the share group.", groupId, memberId);
+        }
+        updatedMemberBuilder = new ShareGroupMember.Builder(member);
+
+        int groupEpoch = group.groupEpoch();
+        Map<String, org.apache.kafka.coordinator.group.share.TopicMetadata> subscriptionMetadata = group.subscriptionMetadata();
+
+        // 1. Create or update the member.
+        ShareGroupMember updatedMember = updatedMemberBuilder
+                .maybeUpdateRackId(Optional.ofNullable(rackId))
+                .maybeUpdateRebalanceTimeoutMs(ofSentinel(rebalanceTimeoutMs))
+                .maybeUpdateSubscribedTopicNames(Optional.ofNullable(subscribedTopicNames))
+                .setClientId(clientId)
+                .setClientHost(clientHost)
+                .build();
+
+        boolean bumpGroupEpoch = false;
+        if (!updatedMember.equals(member)) {
+            if (!updatedMember.subscribedTopicNames().equals(member.subscribedTopicNames())) {
+                log.info("[GroupId {}] Member {} updated its subscribed topics to: {}.",
+                        groupId, memberId, updatedMember.subscribedTopicNames());
+                bumpGroupEpoch = true;
+            }
+        }
+
+        if (bumpGroupEpoch || group.hasMetadataExpired(currentTimeMs)) {
+            // The subscription metadata is updated in two cases:
+            // 1) The member has updated its subscriptions;
+            // 2) The refresh deadline has been reached.
+            subscriptionMetadata = group.computeSubscriptionMetadata(
+                    member,
+                    updatedMember,
+                    metadataImage.topics(),
+                    metadataImage.cluster()
+            );
+
+            if (!subscriptionMetadata.equals(group.subscriptionMetadata())) {
+                log.info("[GroupId {}] Computed new subscription metadata: {}.",
+                        groupId, subscriptionMetadata);
+                bumpGroupEpoch = true;
+            }
+
+            if (bumpGroupEpoch) {
+                groupEpoch += 1;
+                log.info("[GroupId {}] Bumped group epoch to {}.", groupId, groupEpoch);
+            }
+
+            group.setMetadataRefreshDeadline(currentTimeMs + consumerGroupMetadataRefreshIntervalMs, groupEpoch);
+        }
+
+        // 2. Update the target assignment if the group epoch is larger than the target assignment epoch or a static member
+        // replaces an existing static member. The delta between the existing and the new target assignment is persisted to the partition.
+        int targetAssignmentEpoch = group.assignmentEpoch();
+        org.apache.kafka.coordinator.group.share.Assignment targetAssignment = group.targetAssignment(memberId);
+        if (groupEpoch > targetAssignmentEpoch) {
+            try {
+                org.apache.kafka.coordinator.group.share.TargetAssignmentBuilder assignmentResultBuilder =
+                        new org.apache.kafka.coordinator.group.share.TargetAssignmentBuilder(groupId, groupEpoch, shareGroupAssignor)
+                                .withMembers(group.members())
+                                .withSubscriptionMetadata(subscriptionMetadata)
+                                .withTargetAssignment(group.targetAssignment())
+                                .addOrUpdateMember(memberId, updatedMember);
+                org.apache.kafka.coordinator.group.share.TargetAssignmentBuilder.TargetAssignmentResult assignmentResult;
+                assignmentResult = assignmentResultBuilder
+                        .build();
+
+                log.info("[GroupId {}] Computed a new target assignment for epoch {} with '{}' assignor: {}.",
+                        groupId, groupEpoch, shareGroupAssignor, assignmentResult.targetAssignment());
+
+                targetAssignment = assignmentResult.targetAssignment().get(memberId);
+                targetAssignmentEpoch = groupEpoch;
+            } catch (PartitionAssignorException ex) {
+                String msg = String.format("Failed to compute a new target assignment for epoch %d: %s",
+                        groupEpoch, ex.getMessage());
+                log.error("[GroupId {}] {}.", groupId, msg);
+                throw new UnknownServerException(msg, ex);
+            }
+        }
+
+        // 3. Reconcile the member's assignment with the target assignment. This is only required if
+        // a new target assignment has been installed.
+        boolean assignmentUpdated = false;
+        if (updatedMember.targetMemberEpoch() != targetAssignmentEpoch) {
+            ShareGroupMember prevMember = updatedMember;
+            updatedMember = new org.apache.kafka.coordinator.group.share.CurrentAssignmentBuilder(updatedMember)
+                    .withTargetAssignment(targetAssignmentEpoch, targetAssignment)
+                    .build();
+
+            // Checking the reference is enough here because a new instance
+            // is created only when the state has changed.
+            if (updatedMember != prevMember) {
+                assignmentUpdated = true;
+
+                log.info("[GroupId {}] Member {} transitioned from {} to {}.",
+                        groupId, memberId, member.currentAssignmentSummary(), updatedMember.currentAssignmentSummary());
+            }
+        }
+
+        scheduleConsumerGroupSessionTimeout(groupId, memberId);
+
+        // Prepare the response.
+        ShareGroupHeartbeatResponseData response = new ShareGroupHeartbeatResponseData()
+                .setMemberId(updatedMember.memberId())
+                .setMemberEpoch(updatedMember.memberEpoch())
+                .setHeartbeatIntervalMs(consumerGroupHeartbeatIntervalMs);
+
+        // The assignment is only provided in the following cases:
+        // 1. The member just joined or rejoined to group (epoch equals to zero);
+        // 2. The member's assignment has been updated.
+        if (memberEpoch == 0 || assignmentUpdated) {
+            response.setAssignment(createShareGroupResponseAssignment(updatedMember));
+        }
+
+        // Finally, we need to make sure the group is updated. For a consumer group,
+        // this would occur as a result of applying (replaying) a group epoch record.
+        // Because a share group doesn't use any records, we need to do this here.
+        if (bumpGroupEpoch) {
+            group.setGroupEpoch(groupEpoch);
+        }
+        if (assignmentUpdated) {
+            group.updateMember(updatedMember);
         }
 
         return new CoordinatorResult<>(records, response);
@@ -1234,6 +1533,29 @@ public class GroupMetadataManager {
         return new CoordinatorResult<>(records, new ConsumerGroupHeartbeatResponseData()
             .setMemberId(memberId)
             .setMemberEpoch(memberEpoch));
+    }
+
+    /**
+     * Handles leave request from a share group member.
+     * @param groupId       The group id from the request.
+     * @param memberId      The member id from the request.
+     * @param memberEpoch   The member epoch from the request.
+     *
+     * @return A Result containing the ShareGroupHeartbeat response and
+     *         a list of records to update the state machine.
+     */
+    private CoordinatorResult<ShareGroupHeartbeatResponseData, Record> shareGroupLeave(
+            String groupId,
+            String memberId,
+            int memberEpoch
+    ) throws ApiException {
+        ShareGroup group = getOrMaybeCreateShareGroup(groupId, false);
+        List<Record> records = new ArrayList<>();
+        ShareGroupMember member = group.getOrMaybeCreateMember(memberId, false);
+        log.info("[GroupId {}] Member {} left the consumer group.", groupId, memberId);
+        return new CoordinatorResult<>(records, new ShareGroupHeartbeatResponseData()
+                .setMemberId(memberId)
+                .setMemberEpoch(memberEpoch));
     }
 
     /**
@@ -1459,6 +1781,44 @@ public class GroupMetadataManager {
                 request.subscribedTopicNames(),
                 request.serverAssignor(),
                 request.topicPartitions()
+            );
+        }
+    }
+
+    /**
+     * Handles a ShareGroupHeartbeat request.
+     *
+     * @param context The request context.
+     * @param request The actual ShareGroupHeartbeat request.
+     *
+     * @return A Result containing the ShareGroupHeartbeat response and
+     *         a list of records to update the state machine.
+     */
+    public CoordinatorResult<ShareGroupHeartbeatResponseData, Record> shareGroupHeartbeat(
+            RequestContext context,
+            ShareGroupHeartbeatRequestData request
+    ) throws ApiException {
+        throwIfShareGroupHeartbeatRequestIsInvalid(request);
+
+        if (request.memberEpoch() == LEAVE_GROUP_MEMBER_EPOCH || request.memberEpoch() == LEAVE_GROUP_STATIC_MEMBER_EPOCH) {
+            // -1 means that the member wants to leave the group.
+            // -2 means that a static member wants to leave the group.
+            return shareGroupLeave(
+                    request.groupId(),
+                    request.memberId(),
+                    request.memberEpoch()
+            );
+        } else {
+            // Otherwise, it is a regular heartbeat.
+            return shareGroupHeartbeat(
+                    request.groupId(),
+                    request.memberId(),
+                    request.memberEpoch(),
+                    request.rackId(),
+                    request.rebalanceTimeoutMs(),
+                    context.clientId(),
+                    context.clientAddress.toString(),
+                    request.subscribedTopicNames()
             );
         }
     }

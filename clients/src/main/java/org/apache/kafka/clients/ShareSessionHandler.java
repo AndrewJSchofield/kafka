@@ -80,6 +80,10 @@ public class ShareSessionHandler {
     return nextMetadata.sessionId();
   }
 
+  public int sessionEpoch() {
+    return nextMetadata.epoch();
+  }
+
   /**
    * All of the partitions which exist in the share session.
    */

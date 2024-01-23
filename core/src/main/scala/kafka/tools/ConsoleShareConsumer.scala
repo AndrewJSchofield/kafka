@@ -20,7 +20,7 @@ package kafka.tools
 import joptsimple._
 import kafka.utils.Implicits._
 import kafka.utils._
-import org.apache.kafka.clients.consumer.{AcknowledgeType, ConsumerConfig, ConsumerRecord, KafkaShareConsumer}
+import org.apache.kafka.clients.consumer.{AcknowledgeType, ConsumerConfig, ConsumerRecord, KafkaShareConsumerNew}
 import org.apache.kafka.common.MessageFormatter
 import org.apache.kafka.common.errors.{AuthenticationException, TimeoutException, WakeupException}
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
@@ -58,7 +58,7 @@ object ConsoleShareConsumer extends Logging {
 
   def run(conf: ConsumerConfig): Unit = {
     val timeoutMs = if (conf.timeoutMs >= 0) conf.timeoutMs.toLong else Long.MaxValue
-    val consumer = new KafkaShareConsumer(consumerProps(conf), new ByteArrayDeserializer, new ByteArrayDeserializer)
+    val consumer = new KafkaShareConsumerNew(consumerProps(conf), new ByteArrayDeserializer, new ByteArrayDeserializer)
 
     val consumerWrapper =
       new ConsumerWrapper(Option(conf.topicArg), consumer, timeoutMs)
@@ -319,7 +319,7 @@ object ConsoleShareConsumer extends Logging {
 
   private[tools] class ConsumerWrapper(
                                         topic: Option[String],
-                                        consumer: KafkaShareConsumer[Array[Byte], Array[Byte]],
+                                        consumer: KafkaShareConsumerNew[Array[Byte], Array[Byte]],
                                         timeoutMs: Long = Long.MaxValue,
                                         time: Time = Time.SYSTEM
                                       ) {

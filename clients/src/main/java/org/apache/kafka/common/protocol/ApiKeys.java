@@ -119,7 +119,8 @@ public enum ApiKeys {
     ASSIGN_REPLICAS_TO_DIRS(ApiMessageType.ASSIGN_REPLICAS_TO_DIRS),
     LIST_CLIENT_METRICS_RESOURCES(ApiMessageType.LIST_CLIENT_METRICS_RESOURCES),
     SHARE_FETCH(ApiMessageType.SHARE_FETCH),
-    SHARE_ACKNOWLEDGE(ApiMessageType.SHARE_ACKNOWLEDGE);
+    SHARE_ACKNOWLEDGE(ApiMessageType.SHARE_ACKNOWLEDGE),
+    SHARE_GROUP_HEARTBEAT(ApiMessageType.SHARE_GROUP_HEARTBEAT);
 
     private static final Map<ApiMessageType.ListenerType, EnumSet<ApiKeys>> APIS_BY_LISTENER =
         new EnumMap<>(ApiMessageType.ListenerType.class);

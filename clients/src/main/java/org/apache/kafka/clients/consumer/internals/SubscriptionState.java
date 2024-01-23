@@ -1139,7 +1139,7 @@ public class SubscriptionState {
     public static class FetchPosition {
         public final long offset;
         final Optional<Integer> offsetEpoch;
-        final Metadata.LeaderAndEpoch currentLeader;
+        public final Metadata.LeaderAndEpoch currentLeader;
 
         FetchPosition(long offset) {
             this(offset, Optional.empty(), Metadata.LeaderAndEpoch.noLeaderOrEpoch());

@@ -252,6 +252,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.LIST_CLIENT_METRICS_RESOURCES => handleListClientMetricsResources(request)
         case ApiKeys.SHARE_FETCH => handleShareFetchRequest(request).exceptionally(handleError)
         case ApiKeys.SHARE_ACKNOWLEDGE => handleShareAcknowledgeRequest(request).exceptionally(handleError)
+        case ApiKeys.SHARE_GROUP_HEARTBEAT => handleShareGroupHeartbeat(request).exceptionally(handleError)
         case _ => throw new IllegalStateException(s"No handler for request api key ${request.header.apiKey}")
       }
     } catch {
@@ -4050,6 +4051,36 @@ class KafkaApis(val requestChannel: RequestChannel,
 
     requestChannel.sendResponse(request, response, None)
     CompletableFuture.completedFuture[Unit](())
+  }
+
+  def handleShareGroupHeartbeat(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    val shareGroupHeartbeatRequest = request.body[ShareGroupHeartbeatRequest]
+
+    info(s"*** SHARE GROUP HEARTBEAT REQUEST *** + ${shareGroupHeartbeatRequest}")
+
+    if (!config.isNewGroupCoordinatorEnabled) {
+      // The API is not supported by the "old" group coordinator (the default). If the
+      // new one is not enabled, we fail directly here.
+      requestHelper.sendMaybeThrottle(request, shareGroupHeartbeatRequest.getErrorResponse(Errors.UNSUPPORTED_VERSION.exception))
+      CompletableFuture.completedFuture[Unit](())
+    } else if (!authHelper.authorize(request.context, READ, GROUP, shareGroupHeartbeatRequest.data.groupId)) {
+      requestHelper.sendMaybeThrottle(request, shareGroupHeartbeatRequest.getErrorResponse(Errors.GROUP_AUTHORIZATION_FAILED.exception))
+      CompletableFuture.completedFuture[Unit](())
+    } else {
+      groupCoordinator.shareGroupHeartbeat(
+        request.context,
+        shareGroupHeartbeatRequest.data,
+      ).handle[Unit] { (response, exception) =>
+
+        info(s"*** SHARE GROUP HEARTBEAT RESPONSE *** + ${response}")
+
+        if (exception != null) {
+          requestHelper.sendMaybeThrottle(request, shareGroupHeartbeatRequest.getErrorResponse(exception))
+        } else {
+          requestHelper.sendMaybeThrottle(request, new ShareGroupHeartbeatResponse(response))
+        }
+      }
+    }
   }
 
   private def updateRecordConversionStats(request: RequestChannel.Request,

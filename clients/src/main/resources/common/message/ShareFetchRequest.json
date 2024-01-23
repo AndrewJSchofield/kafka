@@ -47,7 +47,18 @@
         { "name": "CurrentLeaderEpoch", "type": "int32", "versions": "0+", "default": "-1", "ignorable": true,
           "about": "The current leader epoch of the partition." },
         { "name": "PartitionMaxBytes", "type": "int32", "versions": "0+",
-          "about": "The maximum bytes to fetch from this partition.  See KIP-74 for cases where this limit may not be honored." }
+          "about": "The maximum bytes to fetch from this partition.  See KIP-74 for cases where this limit may not be honored." },
+        { "name": "AcknowledgementBatches", "type": "[]AcknowledgementBatch", "versions": "0+",
+          "about": "Record batches to acknowledge.", "fields": [
+          { "name": "StartOffset", "type": "int64", "versions": "0+",
+            "about": "Start offset of batch of records to acknowledge."},
+          { "name": "LastOffset", "type": "int64", "versions": "0+",
+            "about": "Last offset (inclusive) of batch of records to acknowledge."},
+          { "name": "GapOffsets", "type": "[]int64", "versions": "0+",
+            "about": "Array of offsets in this range which do not correspond to records."},
+          { "name": "AcknowledgeType", "type": "string", "versions": "0+", "default": "accept",
+            "about": "The type of acknowledgement, such as accept or release."}
+        ]}
       ]}
     ]},
     { "name": "ForgottenTopicsData", "type": "[]ForgottenTopic", "versions": "0+", "ignorable": false,

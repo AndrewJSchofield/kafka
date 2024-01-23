@@ -28,7 +28,8 @@
       "about": "The share session ID." },
     { "name": "Responses", "type": "[]ShareFetchableTopicResponse", "versions": "0+",
       "about": "The response topics.", "fields": [
-      { "name": "TopicId", "type": "uuid", "versions": "0+", "ignorable": true, "about": "The unique topic ID"},
+      { "name": "TopicId", "type": "uuid", "versions": "0+", "ignorable": true,
+        "about": "The unique topic ID"},
       { "name": "Partitions", "type": "[]PartitionData", "versions": "0+",
         "about": "The topic partitions.", "fields": [
         { "name": "PartitionIndex", "type": "int32", "versions": "0+",
@@ -41,6 +42,12 @@
           "about": "The last stable offset (or LSO) of the partition. This is the last offset such that the state of all transactional records prior to this offset have been decided (ABORTED or COMMITTED)" },
         { "name": "LogStartOffset", "type": "int64", "versions": "0+", "default": "-1", "ignorable": true,
           "about": "The current log start offset." },
+        { "name": "CurrentLeader", "type": "LeaderIdAndEpoch", "versions": "0+", "taggedVersions": "0+", "tag": 0, "fields": [
+          { "name": "LeaderId", "type": "int32", "versions": "0+", "default": "-1", "entityType": "brokerId",
+            "about": "The ID of the current leader or -1 if the leader is unknown." },
+          { "name": "LeaderEpoch", "type": "int32", "versions": "0+", "default": "-1",
+            "about": "The latest known leader epoch." }
+        ]},
         { "name": "AbortedTransactions", "type": "[]AbortedTransaction", "versions": "0+", "nullableVersions": "0+", "ignorable": true,
           "about": "The aborted transactions.",  "fields": [
           { "name": "ProducerId", "type": "int64", "versions": "0+", "entityType": "producerId",
@@ -49,12 +56,21 @@
             "about": "The first offset in the aborted transaction." }
         ]},
         { "name": "Records", "type": "records", "versions": "0+", "nullableVersions": "0+", "about": "The record data."},
-        { "name": "AcquiredRecords", "type": "[]AcquiredRecords", "versions": "0+", "about": "The acquired records", "fields":  [
+        { "name": "AcquiredRecords", "type": "[]AcquiredRecords", "versions": "0+", "about": "The acquired records", "fields": [
           {"name": "BaseOffset", "type":  "int64", "versions": "0+", "about": "The earliest offset in this batch of acquired records."},
           {"name": "LastOffset", "type": "int64", "versions": "0+", "about": "The last offset of this batch of acquired records."},
           {"name": "DeliveryCount", "type": "int16", "versions": "0+", "about": "The delivery count of this batch of acquired records."}
         ]}
       ]}
+    ]},
+    { "name": "NodeEndpoints", "type": "[]NodeEndpoint", "versions": "0+", "taggedVersions": "0+", "tag": 0,
+      "about": "Endpoints for all current leaders enumerated in PartitionData, with error NOT_LEADER_OR_FOLLOWER.", "fields": [
+      { "name": "NodeId", "type": "int32", "versions": "0+",
+        "mapKey": true, "entityType": "brokerId", "about": "The ID of the associated node." },
+      { "name": "Host", "type": "string", "versions": "0+", "about": "The node's hostname." },
+      { "name": "Port", "type": "int32", "versions": "0+", "about": "The node's port." },
+      { "name": "Rack", "type": "string", "versions": "0+", "nullableVersions": "0+", "default": "null",
+        "about": "The rack of the node, or null if it has not been assigned to a rack." }
     ]}
   ]
 }

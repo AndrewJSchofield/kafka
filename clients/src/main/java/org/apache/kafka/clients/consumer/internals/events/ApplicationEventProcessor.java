@@ -125,6 +125,10 @@ public class ApplicationEventProcessor extends EventProcessor<ApplicationEvent> 
                 process((LeaveOnCloseApplicationEvent) event);
                 return;
 
+            case SHARE_ACKNOWLEDGE:
+                process((ShareAcknowledgeApplicationEvent) event);
+                return;
+
             default:
                 log.warn("Application event type " + event.type() + " was not expected");
         }
@@ -269,6 +273,15 @@ public class ApplicationEventProcessor extends EventProcessor<ApplicationEvent> 
         log.debug("Leaving group before closing");
         CompletableFuture<Void> future = membershipManager.leaveGroup();
         // The future will be completed on heartbeat sent
+        event.chain(future);
+    }
+
+    private void process(final ShareAcknowledgeApplicationEvent event) {
+        // There also needs to be an acknowledge on close
+        if (requestManagers.shareFetchRequestManager == null) {
+            event.future().complete(null);
+        }
+        CompletableFuture<Void> future = requestManagers.shareFetchRequestManager.acknowledge(event);
         event.chain(future);
     }
 

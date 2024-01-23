@@ -294,7 +294,7 @@ public class ProducerPerformance {
                 .help("throttle maximum message throughput to *approximately* THROUGHPUT messages/sec. Set this to -1 to disable throttling.");
 
         parser.addArgument("--payload-monotonic")
-                .action(store())
+                .action(storeTrue())
                 .type(Boolean.class)
                 .metavar("PAYLOAD-MONOTONIC")
                 .dest("payloadMonotonic")

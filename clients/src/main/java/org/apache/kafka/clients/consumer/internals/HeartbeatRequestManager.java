@@ -27,9 +27,12 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.message.ConsumerGroupHeartbeatRequestData;
+import org.apache.kafka.common.message.ShareGroupHeartbeatRequestData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest;
 import org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse;
+import org.apache.kafka.common.requests.ShareGroupHeartbeatRequest;
+import org.apache.kafka.common.requests.ShareGroupHeartbeatResponse;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
@@ -110,6 +113,7 @@ public class HeartbeatRequestManager implements RequestManager {
     private final Timer pollTimer;
 
     private GroupMetadataUpdateEvent previousGroupMetadataUpdateEvent = null;
+    private boolean isShareGroup;
 
     public HeartbeatRequestManager(
         final LogContext logContext,
@@ -130,6 +134,7 @@ public class HeartbeatRequestManager implements RequestManager {
         this.heartbeatRequestState = new HeartbeatRequestState(logContext, time, 0, retryBackoffMs,
             retryBackoffMaxMs, maxPollIntervalMs);
         this.pollTimer = time.timer(maxPollIntervalMs);
+        this.isShareGroup = (membershipManager instanceof ShareGroupMembershipManagerImpl);
     }
 
     // Visible for testing
@@ -150,6 +155,7 @@ public class HeartbeatRequestManager implements RequestManager {
         this.membershipManager = membershipManager;
         this.backgroundEventHandler = backgroundEventHandler;
         this.pollTimer = timer;
+        this.isShareGroup = (membershipManager instanceof ShareGroupMembershipManagerImpl);
     }
 
     /**
@@ -240,6 +246,12 @@ public class HeartbeatRequestManager implements RequestManager {
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs,
                                                                      final boolean ignoreResponse) {
+        if (isShareGroup) {
+            NetworkClientDelegate.UnsentRequest request = makeShareGroupHeartbeatRequest(ignoreResponse);
+            heartbeatRequestState.onSendAttempt(currentTimeMs);
+            membershipManager.onHeartbeatRequestSent();
+            return request;
+        }
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(ignoreResponse);
         heartbeatRequestState.onSendAttempt(currentTimeMs);
         membershipManager.onHeartbeatRequestSent();
@@ -262,17 +274,48 @@ public class HeartbeatRequestManager implements RequestManager {
             });
     }
 
+    private NetworkClientDelegate.UnsentRequest makeShareGroupHeartbeatRequest(final boolean ignoreResponse) {
+        NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
+                new ShareGroupHeartbeatRequest.Builder(this.heartbeatState.buildShareGroupRequestData()),
+                coordinatorRequestManager.coordinator());
+        if (ignoreResponse)
+            return logShareGroupResponse(request);
+        else
+            return request.whenComplete((response, exception) -> {
+                if (response != null) {
+                    onResponse((ShareGroupHeartbeatResponse) response.responseBody(), request.handler().completionTimeMs());
+                } else {
+                    onFailure(exception, request.handler().completionTimeMs());
+                }
+            });
+    }
+
     private NetworkClientDelegate.UnsentRequest logResponse(final NetworkClientDelegate.UnsentRequest request) {
         return request.whenComplete((response, exception) -> {
             if (response != null) {
                 Errors error =
                     Errors.forCode(((ConsumerGroupHeartbeatResponse) response.responseBody()).data().errorCode());
                 if (error == Errors.NONE)
-                    logger.debug("GroupHeartbeat responded successfully: {}", response);
+                    logger.debug("ConsumerGroupHeartbeat responded successfully: {}", response);
                 else
-                    logger.error("GroupHeartbeat failed because of {}: {}", error, response);
+                    logger.error("ConsumerGroupHeartbeat failed because of {}: {}", error, response);
             } else {
-                logger.error("GroupHeartbeat failed because of unexpected exception.", exception);
+                logger.error("ConsumerGroupHeartbeat failed because of unexpected exception.", exception);
+            }
+        });
+    }
+
+    private NetworkClientDelegate.UnsentRequest logShareGroupResponse(final NetworkClientDelegate.UnsentRequest request) {
+        return request.whenComplete((response, exception) -> {
+            if (response != null) {
+                Errors error =
+                        Errors.forCode(((ShareGroupHeartbeatResponse) response.responseBody()).data().errorCode());
+                if (error == Errors.NONE)
+                    logger.debug("ShareGroupHeartbeat responded successfully: {}", response);
+                else
+                    logger.error("ShareGroupHeartbeat failed because of {}: {}", error, response);
+            } else {
+                logger.error("ShareGroupHeartbeat failed because of unexpected exception.", exception);
             }
         });
     }
@@ -293,6 +336,18 @@ public class HeartbeatRequestManager implements RequestManager {
     }
 
     private void onResponse(final ConsumerGroupHeartbeatResponse response, long currentTimeMs) {
+        if (Errors.forCode(response.data().errorCode()) == Errors.NONE) {
+            heartbeatRequestState.updateHeartbeatIntervalMs(response.data().heartbeatIntervalMs());
+            heartbeatRequestState.onSuccessfulAttempt(currentTimeMs);
+            heartbeatRequestState.resetTimer();
+            membershipManager.onHeartbeatResponseReceived(response.data());
+            maybeSendGroupMetadataUpdateEvent();
+            return;
+        }
+        onErrorResponse(response, currentTimeMs);
+    }
+
+    private void onResponse(final ShareGroupHeartbeatResponse response, long currentTimeMs) {
         if (Errors.forCode(response.data().errorCode()) == Errors.NONE) {
             heartbeatRequestState.updateHeartbeatIntervalMs(response.data().heartbeatIntervalMs());
             heartbeatRequestState.onSuccessfulAttempt(currentTimeMs);
@@ -399,6 +454,86 @@ public class HeartbeatRequestManager implements RequestManager {
         }
     }
 
+    private void onErrorResponse(final ShareGroupHeartbeatResponse response,
+                                 final long currentTimeMs) {
+        Errors error = Errors.forCode(response.data().errorCode());
+        String errorMessage = response.data().errorMessage();
+        String message;
+
+        this.heartbeatState.reset();
+
+        // TODO: upon encountering a fatal/fenced error, trigger onPartitionLost logic to give up the current
+        //  assignments.
+        switch (error) {
+            case NOT_COORDINATOR:
+                // the manager should retry immediately when the coordinator node becomes available again
+                message = String.format("ShareGroupHeartbeatRequest failed because the group coordinator %s is incorrect. " +
+                                "Will attempt to find the coordinator again and retry",
+                        coordinatorRequestManager.coordinator());
+                logInfo(message, response, currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                break;
+
+            case COORDINATOR_NOT_AVAILABLE:
+                message = String.format("ShareGroupHeartbeatRequest failed because the group coordinator %s is not available. " +
+                                "Will attempt to find the coordinator again and retry",
+                        coordinatorRequestManager.coordinator());
+                logInfo(message, response, currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                break;
+
+            case COORDINATOR_LOAD_IN_PROGRESS:
+                // the manager will backoff and retry
+                message = String.format("ShareGroupHeartbeatRequest failed because the group coordinator %s is still loading." +
+                                "Will retry",
+                        coordinatorRequestManager.coordinator());
+                logInfo(message, response, currentTimeMs);
+                heartbeatRequestState.onFailedAttempt(currentTimeMs);
+                break;
+
+            case GROUP_AUTHORIZATION_FAILED:
+                GroupAuthorizationException exception =
+                        GroupAuthorizationException.forGroupId(membershipManager.groupId());
+                logger.error("ShareGroupHeartbeatRequest failed due to group authorization failure: {}", exception.getMessage());
+                handleFatalFailure(error.exception(exception.getMessage()));
+                break;
+
+            case UNRELEASED_INSTANCE_ID:
+                logger.error("ShareGroupHeartbeatRequest failed due to the instance id {} was not released: {}",
+                        membershipManager.groupInstanceId().orElse("null"), errorMessage);
+                handleFatalFailure(Errors.UNRELEASED_INSTANCE_ID.exception(errorMessage));
+                break;
+
+            case INVALID_REQUEST:
+            case GROUP_MAX_SIZE_REACHED:
+            case UNSUPPORTED_ASSIGNOR:
+            case UNSUPPORTED_VERSION:
+                logger.error("ShareGroupHeartbeatRequest failed due to error: {}", error);
+                handleFatalFailure(error.exception(errorMessage));
+                break;
+
+            case FENCED_MEMBER_EPOCH:
+                message = String.format("ShareGroupHeartbeatRequest failed for member %s because epoch %s is fenced.",
+                        membershipManager.memberId(), membershipManager.memberEpoch());
+                logInfo(message, response, currentTimeMs);
+                membershipManager.transitionToFenced();
+                break;
+
+            case UNKNOWN_MEMBER_ID:
+                message = String.format("ShareGroupHeartbeatRequest failed because member %s is unknown.",
+                        membershipManager.memberId());
+                logInfo(message, response, currentTimeMs);
+                membershipManager.transitionToFenced();
+                break;
+
+            default:
+                // If the manager receives an unknown error - there could be a bug in the code or a new error code
+                logger.error("ShareGroupHeartbeatRequest failed due to unexpected error: {}", error);
+                handleFatalFailure(error.exception(errorMessage));
+                break;
+        }
+    }
+
     private void logInfo(final String message,
                          final ConsumerGroupHeartbeatResponse response,
                          final long currentTimeMs) {
@@ -406,6 +541,15 @@ public class HeartbeatRequestManager implements RequestManager {
             message,
             heartbeatRequestState.remainingBackoffMs(currentTimeMs),
             response.data().errorMessage());
+    }
+
+    private void logInfo(final String message,
+                         final ShareGroupHeartbeatResponse response,
+                         final long currentTimeMs) {
+        logger.info("{} in {}ms: {}",
+                message,
+                heartbeatRequestState.remainingBackoffMs(currentTimeMs),
+                response.data().errorMessage());
     }
 
     private void handleFatalFailure(Throwable error) {
@@ -558,6 +702,34 @@ public class HeartbeatRequestManager implements RequestManager {
                     buildTopicPartitionsList(membershipManager.currentAssignment());
                 data.setTopicPartitions(topicPartitions);
                 sentFields.topicPartitions = assignedPartitions;
+            }
+
+            return data;
+        }
+
+        public ShareGroupHeartbeatRequestData buildShareGroupRequestData() {
+            ShareGroupHeartbeatRequestData data = new ShareGroupHeartbeatRequestData();
+
+            // GroupId - always sent
+            data.setGroupId(membershipManager.groupId());
+
+            // MemberId - always sent, empty until it has been received from the coordinator
+            data.setMemberId(membershipManager.memberId());
+
+            // MemberEpoch - always sent
+            data.setMemberEpoch(membershipManager.memberEpoch());
+
+            // RebalanceTimeoutMs - only sent if has changed since the last heartbeat
+            if (sentFields.rebalanceTimeoutMs != rebalanceTimeoutMs) {
+                data.setRebalanceTimeoutMs(rebalanceTimeoutMs);
+                sentFields.rebalanceTimeoutMs = rebalanceTimeoutMs;
+            }
+
+            // SubscribedTopicNames - only sent if has changed since the last heartbeat
+            TreeSet<String> subscribedTopicNames = new TreeSet<>(this.subscriptions.subscription());
+            if (!subscribedTopicNames.equals(sentFields.subscribedTopicNames)) {
+                data.setSubscribedTopicNames(new ArrayList<>(this.subscriptions.subscription()));
+                sentFields.subscribedTopicNames = subscribedTopicNames;
             }
 
             return data;

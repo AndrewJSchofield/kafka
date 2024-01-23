@@ -204,7 +204,7 @@ public class FetchBuffer implements AutoCloseable {
      *
      * @param partitions {@link Set} of {@link TopicPartition}s for which any buffered data should be kept
      */
-    void retainAll(final Set<TopicPartition> partitions) {
+    public void retainAll(final Set<TopicPartition> partitions) {
         try {
             lock.lock();
 

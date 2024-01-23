@@ -46,7 +46,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 /**
- * {@code ShareFetch} represents the basic state and logic for record fetching processing for a share group.
+ * {@code ShareFetcher} represents the basic state and logic for record fetching processing for a share group.
  * @param <K> Type for the message key
  * @param <V> Type for the message value
  */
